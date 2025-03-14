@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>네이버 지도 생성기</title>
+    <!-- Naver Maps API (반드시 YOUR_CLIENT_ID를 실제 네이버 클라이언트 ID로 교체하세요) -->
+    <script src="https://oapi.map.naver.com/openapi/v3/maps.js?ncpClientId=9w0x686rje"></script>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      #map {
+        height: 100%;
+        width: 100%;
+      }
+      /* 상단 컨트롤바 스타일 */
+      #controls {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        z-index: 1100;
+        background: white;
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      /* 현재 내 위치 이동 버튼: 내 위치 마커와 동일한 디자인 */
+      #centerLocation {
+        cursor: pointer;
+        width: 30px;
+        height: 30px;
+        background: radial-gradient(circle, #00c6ff 0%, #0072ff 100%);
+        border: 3px solid white;
+        border-radius: 50%;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+      }
+      /* 방문 카운터 스타일 */
+      #visitCounter {
+        font-size: 14px;
+        font-weight: bold;
+      }
+      /* 정보 다이얼로그 스타일 */
+      #infoDialog {
+        position: fixed;
+        top: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 10px 20px;
+        border-radius: 4px;
+        z-index: 1200;
+        font-size: 16px;
+        display: none;
+      }
+      /* 팝업 내 아이템 박스 (툴팁) */
+      .item-box {
+        position: relative;
+        padding: 10px 40px 10px 10px;
+        margin-bottom: 10px;
+        cursor: pointer;
+        user-select: none;
+        border: 1px solid #ccc;
+      }
+      .item-box input[type="checkbox"] {
+        position: absolute;
+        bottom: 5px;
+        right: 5px;
+        transform: scale(1.5);
+        cursor: pointer;
+        z-index: 2;
+      }
+      .item-box div {
+        word-wrap: break-word;
+      }
+      /* 팝업 컨테이너 */
+      .popup-container {
+        cursor: default;
+        overflow-y: auto;
+        max-height: 400px;
+        max-width: calc(100vw - 20px);
+      }
+      /* 고급 컨트롤 패널 */
+      #advancedPanel {
+        position: fixed;
+        top: 50%;
+        right: -200px; /* hide offscreen initially */
+        width: 180px;
+        background: #f9f9f9;
+        border: 1px solid #ccc;
+        border-radius: 4px 0 0 4px;
+        padding: 10px;
+        box-shadow: -2px 2px 6px rgba(0, 0, 0, 0.3);
+        transform: translateY(-50%);
+        transition: right 0.3s;
+        z-index: 1100;
+      }
+      /* 고급 패널 토글 버튼: 오른쪽 중앙에 배치 */
+      #panelToggle {
+        position: fixed;
+        top: 50%;
+        right: 0;
+        transform: translateY(-50%);
+        width: 30px;
+        height: 30px;
+        background: #28a745;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        z-index: 1150;
+        box-shadow: -2px 2px 6px rgba(0, 0, 0, 0.3);
+      }
+      #panelToggle svg {
+        width: 20px;
+        height: 20px;
+        fill: white;
+        transition: transform 0.3s;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 정보 다이얼로그 -->
+    <div id="infoDialog"></div>
+    <!-- 지도 영역 -->
+    <div id="map"></div>
+    <!-- 상단 기본 컨트롤바 -->
+    <div id="controls">
+      <button id="centerLocation" title="현재 내 위치로 이동"></button>
+      <span id="visitCounter">0 / 0</span>
+    </div>
+    <!-- 고급 컨트롤 패널 (전체 방문 확인, 전체 방문 해제 버튼) -->
+    <div id="advancedPanel">
+      <button id="checkAll">전체 방문 확인</button>
+      <br /><br />
+      <button id="uncheckAll">전체 방문 해제</button>
+    </div>
+    <!-- 고급 패널 토글 버튼 (우측 중앙에 자리함) -->
+    <div id="panelToggle" title="고급 버튼 보이기/숨기기">
+      <svg viewBox="0 0 24 24">
+        <path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z" />
+      </svg>
+    </div>
+    <script>
+      // 전역 변수
+      let map;
+      let markerGroups = []; // 좌표별 그룹 배열
+      const STORAGE_KEY = "visitedState";
+      let mobileMarker = null;  // 모바일 현재 위치 마커
+
+      // 방문 상태 저장
+      function saveVisitedState() {
+        const state = {};
+        markerGroups.forEach((group) => {
+          state[group.key] = group.data.map(item => item.visited);
+        });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      }
+
+      // 방문 상태 불러오기
+      function loadVisitedState() {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          try {
+            return JSON.parse(stored);
+          } catch (e) {
+            return null;
+          }
+        }
+        return null;
+      }
+
+      // 방문 카운터 업데이트
+      function updateVisitCounter() {
+        const totalItems = markerGroups.reduce((sum, group) => sum + group.data.length, 0);
+        const visitedItems = markerGroups.reduce((sum, group) => sum + group.data.filter(item => item.visited).length, 0);
+        document.getElementById("visitCounter").textContent = `${visitedItems} / ${totalItems}`;
+      }
+
+      // 팝업 콘텐츠 생성 함수
+      function createPopupContent(group, groupIndex) {
+        let content = `<div id="popup-container-${groupIndex}" class="popup-container" onclick="event.stopPropagation()">`;
+        group.data.forEach((item, index) => {
+          content += `
+            <div class="item-box" onclick="handleItemClick(event, ${groupIndex}, ${index})">
+              <div>
+                <strong>${item.name}</strong><br/>
+                <em>대표자명: ${item.owner}</em><br/>
+                ${item.address}
+              </div>
+              <input type="checkbox" data-group-index="${groupIndex}" data-item-index="${index}"
+                ${item.visited ? "checked" : ""} onclick="event.stopPropagation(); handleCheckboxChange(event)" />
+            </div>
+          `;
+        });
+        content += "</div>";
+        return content;
+      }
+
+      // 기존 장소 핀 아이콘 (변경하지 않음)
+      function getCustomDivIcon(group) {
+        const allVisited = group.data.every(item => item.visited);
+        let color, opacity;
+        if (allVisited) {
+          color = "grey";
+          opacity = 0.6;
+        } else {
+          opacity = 1.0;
+          color = group.data.length > 1 ? "red" : "blue";
+        }
+        let iconUrl = "";
+        if (color === "grey")
+          iconUrl = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-grey.png";
+        else if (color === "red")
+          iconUrl = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png";
+        else
+          iconUrl = "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png";
+
+        let countText = group.data.length > 1 ? group.data.length : "";
+        const html = `
+          <div style="position: relative; width: 25px; height: 41px;">
+            <img src="${iconUrl}" style="width: 25px; height: 41px; opacity: ${opacity};" />
+            ${ countText ? `<div style="position: absolute; top: 0; left: 0; width: 25px; height: 41px;
+                          display: flex; align-items: center; justify-content: center;">
+                          <div style="background: rgba(0,0,0,0.4); border-radius: 50%;
+                          padding: 2px 4px; margin-top: -4px;">
+                            <span style="font-weight: bold; color: white; font-size: 12px;
+                            text-shadow: 1px 1px 2px black;">${countText}</span>
+                          </div>
+                        </div>` : ""
+            }
+          </div>
+        `;
+        return { content: html, size: new naver.maps.Size(25, 41), anchor: new naver.maps.Point(12, 41) };
+      }
+
+      // 마커 및 팝업 업데이트 (스크롤 보존)
+      function updateMarkerIcon(group) {
+        group.marker.setIcon(getCustomDivIcon(group));
+        if (group.infoWindow) {
+          const groupIndex = markerGroups.indexOf(group);
+          const containerEl = document.getElementById(`popup-container-${groupIndex}`);
+          const scrollTop = containerEl ? containerEl.scrollTop : 0;
+          const newContent = createPopupContent(group, groupIndex);
+          group.infoWindow.setContent(newContent);
+          setTimeout(() => {
+            const newContainerEl = document.getElementById(`popup-container-${groupIndex}`);
+            if (newContainerEl) {
+              newContainerEl.scrollTop = scrollTop;
+            }
+          }, 0);
+        }
+      }
+
+      // 체크박스 클릭 처리
+      function handleCheckboxChange(event) {
+        const groupIndex = event.target.getAttribute("data-group-index");
+        const itemIndex = event.target.getAttribute("data-item-index");
+        const group = markerGroups[groupIndex];
+        group.data[itemIndex].visited = event.target.checked;
+        updateMarkerIcon(group);
+        saveVisitedState();
+        updateVisitCounter();
+      }
+      window.handleCheckboxChange = handleCheckboxChange;
+
+      // 아이템 클릭 처리 (토글)
+      function handleItemClick(event, groupIndex, itemIndex) {
+        const group = markerGroups[groupIndex];
+        group.data[itemIndex].visited = !group.data[itemIndex].visited;
+        updateMarkerIcon(group);
+        saveVisitedState();
+        updateVisitCounter();
+      }
+      window.handleItemClick = handleItemClick;
+
+      // 내 위치로 지도 중심 이동
+      function centerOnMyLocation() {
+        if (mobileMarker && map) {
+          const pos = mobileMarker.getPosition();
+          map.setCenter(pos);
+          map.setZoom(17); // 약 200미터 반경
+        }
+      }
+
+      // 고급 패널 토글 함수 처리
+      function toggleAdvancedPanel() {
+        const panel = document.getElementById("advancedPanel");
+        const toggleBtn = document.getElementById("panelToggle");
+        // Check computed style (convert to number of pixels)
+        const currentRight = window.getComputedStyle(panel).right;
+        if (currentRight === "10px") {
+          panel.style.right = "-200px";
+          toggleBtn.querySelector("svg").style.transform = "rotate(0deg)";
+        } else {
+          panel.style.right = "10px";
+          toggleBtn.querySelector("svg").style.transform = "rotate(180deg)";
+        }
+      }
+
+      // 맵 초기화 및 마커 추가 (parsed.json 데이터 사용)
+      function initMap() {
+        fetch("parsed.json")
+          .then(response => response.json())
+          .then(json => {
+            markerGroups = [];
+            json.data.forEach(entry => {
+              const key = entry.lat + "," + entry.lon;
+              let group = markerGroups.find(g => g.key === key);
+              if (!group) {
+                group = { key: key, lat: parseFloat(entry.lat), lon: parseFloat(entry.lon), data: [] };
+                markerGroups.push(group);
+              }
+              group.data.push({ name: entry.name, owner: entry.owner, address: entry.address, visited: false });
+            });
+            const storedState = loadVisitedState();
+            if (storedState) {
+              markerGroups.forEach(group => {
+                if (storedState[group.key] && storedState[group.key].length === group.data.length) {
+                  group.data.forEach((item, idx) => {
+                    item.visited = storedState[group.key][idx];
+                  });
+                }
+              });
+            }
+            updateVisitCounter();
+
+            let sumLat = 0, sumLon = 0;
+            markerGroups.forEach(group => {
+              sumLat += group.lat;
+              sumLon += group.lon;
+            });
+            const avgLat = sumLat / markerGroups.length;
+            const avgLon = sumLon / markerGroups.length;
+
+            map = new naver.maps.Map("map", {
+              center: new naver.maps.LatLng(avgLat, avgLon),
+              zoom: 13
+            });
+
+            markerGroups.forEach((group, idx) => {
+              group.marker = new naver.maps.Marker({
+                position: new naver.maps.LatLng(group.lat, group.lon),
+                map: map,
+                icon: getCustomDivIcon(group)
+              });
+
+              naver.maps.Event.addListener(group.marker, "click", function() {
+                // 닫혀 있는 InfoWindow 닫기
+                markerGroups.forEach(g => {
+                  if (g.infoWindow && !g.infoWindow.justOpened) {
+                    g.infoWindow.close();
+                    g.infoWindow = null;
+                  }
+                });
+                if (group.infoWindow) {
+                  group.infoWindow.close();
+                  group.infoWindow = null;
+                } else {
+                  const content = createPopupContent(group, idx);
+                  group.infoWindow = new naver.maps.InfoWindow({
+                    content: content,
+                    disableAnchor: true
+                  });
+                  group.infoWindow.open(map, group.marker);
+                  group.infoWindow.justOpened = true;
+                  setTimeout(() => { delete group.infoWindow.justOpened; }, 100);
+                  setTimeout(() => {
+                    if (map.getProjection) {
+                      const markerPoint = map.getProjection().fromCoordToOffset(group.marker.getPosition());
+                      if (markerPoint.y < 150) {
+                        const offsetY = 150 - markerPoint.y + 50;
+                        map.panBy(0, offsetY);
+                      }
+                    } else {
+                      map.panBy(0, 150);
+                    }
+                  }, 200);
+                  naver.maps.Event.addListener(group.infoWindow, "closeclick", function() {
+                    group.infoWindow = null;
+                  });
+                }
+              });
+            });
+
+            document.addEventListener("click", function(e) {
+              if (e.target.closest(".popup-container")) return;
+              markerGroups.forEach(group => {
+                if (group.infoWindow && !group.infoWindow.justOpened) {
+                  group.infoWindow.close();
+                  group.infoWindow = null;
+                }
+              });
+            });
+            const totalItems = markerGroups.reduce((sum, group) => sum + group.data.length, 0);
+            showInfoDialog(`전체 ${totalItems}개의 장소가 로드되었습니다.`);
+            saveVisitedState();
+          })
+          .catch(err => console.error("data load error:", err));
+
+        // 모바일 기기 현재 위치 추적
+        if (navigator.geolocation) {
+          navigator.geolocation.watchPosition(
+            function(position) {
+              const lat = position.coords.latitude;
+              const lon = position.coords.longitude;
+              const currentLatLng = new naver.maps.LatLng(lat, lon);
+              if (!mobileMarker) {
+                mobileMarker = new naver.maps.Marker({
+                  position: currentLatLng,
+                  map: map,
+                  icon: {
+                    content: `<div style="
+                              width: 25px;
+                              height: 25px;
+                              border: 3px solid white;
+                              background: radial-gradient(circle, #00c6ff 0%, #0072ff 100%);
+                              border-radius: 50%;
+                              box-shadow: 0px 3px 6px rgba(0,0,0,0.3);
+                              "></div>`,
+                    size: new naver.maps.Size(25, 25),
+                    anchor: new naver.maps.Point(12, 12)
+                  }
+                });
+              } else {
+                mobileMarker.setPosition(currentLatLng);
+              }
+            },
+            function(error) {
+              console.error("Geolocation error:", error);
+            },
+            {
+              enableHighAccuracy: true,
+              maximumAge: 0
+            }
+          );
+        }
+      }
+
+      // 이벤트 리스너 등록
+      document.getElementById("checkAll").addEventListener("click", () => {
+        markerGroups.forEach(group => {
+          group.data.forEach(item => item.visited = true);
+          updateMarkerIcon(group);
+        });
+        saveVisitedState();
+        updateVisitCounter();
+      });
+      document.getElementById("uncheckAll").addEventListener("click", () => {
+        markerGroups.forEach(group => {
+          group.data.forEach(item => item.visited = false);
+          updateMarkerIcon(group);
+        });
+        saveVisitedState();
+        updateVisitCounter();
+      });
+      document.getElementById("centerLocation").addEventListener("click", centerOnMyLocation);
+      document.getElementById("panelToggle").addEventListener("click", toggleAdvancedPanel);
+
+      function showInfoDialog(message) {
+        const dialog = document.getElementById("infoDialog");
+        dialog.innerText = message;
+        dialog.style.display = "block";
+        setTimeout(() => {
+          dialog.style.display = "none";
+        }, 3000);
+      }
+
+      window.onload = initMap;
+    </script>
+  </body>
+</html>
